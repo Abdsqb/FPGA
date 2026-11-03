@@ -1,0 +1,5 @@
+; Pure OCaml, no Hardcaml: the reference model, the ITCH codec and the
+; random feed generator. Everything here runs on any laptop.
+
+(library
+ (name model))

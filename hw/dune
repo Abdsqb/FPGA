@@ -1,0 +1,8 @@
+; Hardware designs written in Hardcaml. Right now: the homework counter.
+; The parser, order table and top-of-book logic (CompE teammate) go here.
+
+(library
+ (name hw)
+ (libraries hardcaml)
+ (preprocess
+  (pps ppx_hardcaml ppx_jane)))

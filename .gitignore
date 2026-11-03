@@ -1,0 +1,11 @@
+_build/
+_opam/
+*.install
+*.bin
+*.vcd
+.merlin
+# Vivado output
+*.jou
+*.log
+.Xil/
+vivado_project/
