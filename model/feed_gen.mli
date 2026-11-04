@@ -1,9 +1,9 @@
 (** Random feed generator: an endless stream of VALID messages.
 
     "Valid" means the stream never breaks the rules the hardware relies on:
-    - order ids are in [0, max_orders) and a live id is never re-added;
-    - Executed / Cancel / Delete only target live orders;
-    - Executed / Cancel never remove more shares than remain;
+    - order ids are in [0, max_orders) and a live order_ref is never re-added;
+    - Order_executed / Order_cancel / Order_delete only target live orders;
+    - Order_executed / Order_cancel never remove more shares than remain;
     - bids sit below [mid] and asks above it, so the book never crosses
       (we do not model matching).
 
@@ -18,7 +18,7 @@ type config =
   ; levels : int
         (** prices are mid +/- tick * [1..levels]; few levels means price
             levels empty and refill often, which stresses next-best logic *)
-  ; max_lots : int  (** qty is 100 * [1..max_lots] *)
+  ; max_lots : int  (** shares is 100 * [1..max_lots] *)
   }
 
 val default_config : config

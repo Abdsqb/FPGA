@@ -6,8 +6,8 @@ type order =
   ; remaining : int
   }
 
-(* [orders]: every live order by id. ITCH Executed/Cancel/Delete carry only
-   the id, so we must remember each order's side and price to find its
+(* [orders]: every live order by order_ref. ITCH Order_executed/Order_cancel/Order_delete carry only
+   the order_ref, so we must remember each order's side and price to find its
    price level. The hardware keeps the same table in block RAM.
 
    [bids] / [asks]: price -> total remaining shares at that price. Only
@@ -22,7 +22,7 @@ type error =
   | Unknown_order of int
   | Duplicate_order of int
   | Over_reduce of
-      { id : int
+      { order_ref : int
       ; remaining : int
       ; requested : int
       }
@@ -31,10 +31,10 @@ type error =
 let empty = { orders = IntMap.empty; bids = IntMap.empty; asks = IntMap.empty }
 
 let error_to_string = function
-  | Unknown_order id -> Printf.sprintf "unknown order id %d" id
-  | Duplicate_order id -> Printf.sprintf "duplicate order id %d" id
-  | Over_reduce { id; remaining; requested } ->
-    Printf.sprintf "order %d: asked to remove %d shares but only %d remain" id
+  | Unknown_order order_ref -> Printf.sprintf "unknown order ref %d" order_ref
+  | Duplicate_order order_ref -> Printf.sprintf "duplicate order ref %d" order_ref
+  | Over_reduce { order_ref; remaining; requested } ->
+    Printf.sprintf "order %d: asked to remove %d shares but only %d remain" order_ref
       requested remaining
   | Bad_field s -> "bad field: " ^ s
 
@@ -55,37 +55,37 @@ let adjust_level t side price delta =
   let l = if next = 0 then IntMap.remove price l else IntMap.add price next l in
   with_levels t side l
 
-let reduce t id qty =
-  match IntMap.find_opt id t.orders with
-  | None -> Error (Unknown_order id)
-  | Some o when qty <= 0 -> ignore o; Error (Bad_field "reduce qty must be > 0")
-  | Some o when qty > o.remaining ->
-    Error (Over_reduce { id; remaining = o.remaining; requested = qty })
+let reduce t order_ref shares =
+  match IntMap.find_opt order_ref t.orders with
+  | None -> Error (Unknown_order order_ref)
+  | Some o when shares <= 0 -> ignore o; Error (Bad_field "reduce shares must be > 0")
+  | Some o when shares > o.remaining ->
+    Error (Over_reduce { order_ref; remaining = o.remaining; requested = shares })
   | Some o ->
-    let t = adjust_level t o.side o.price (-qty) in
-    let remaining = o.remaining - qty in
+    let t = adjust_level t o.side o.price (-shares) in
+    let remaining = o.remaining - shares in
     let orders =
-      if remaining = 0 then IntMap.remove id t.orders
-      else IntMap.add id { o with remaining } t.orders
+      if remaining = 0 then IntMap.remove order_ref t.orders
+      else IntMap.add order_ref { o with remaining } t.orders
     in
     Ok { t with orders }
 
 let apply t (msg : Msg.t) =
   match msg with
-  | Add { id; side; price; qty } ->
-    if IntMap.mem id t.orders then Error (Duplicate_order id)
-    else if qty <= 0 then Error (Bad_field "add qty must be > 0")
+  | Add_order { order_ref; side; price; shares } ->
+    if IntMap.mem order_ref t.orders then Error (Duplicate_order order_ref)
+    else if shares <= 0 then Error (Bad_field "add shares must be > 0")
     else if price <= 0 then Error (Bad_field "price must be > 0")
     else
-      let t = adjust_level t side price qty in
-      Ok { t with orders = IntMap.add id { side; price; remaining = qty } t.orders }
-  | Executed { id; qty } | Cancel { id; qty } -> reduce t id qty
-  | Delete { id } ->
-    (match IntMap.find_opt id t.orders with
-     | None -> Error (Unknown_order id)
+      let t = adjust_level t side price shares in
+      Ok { t with orders = IntMap.add order_ref { side; price; remaining = shares } t.orders }
+  | Order_executed { order_ref; shares } | Order_cancel { order_ref; shares } -> reduce t order_ref shares
+  | Order_delete { order_ref } ->
+    (match IntMap.find_opt order_ref t.orders with
+     | None -> Error (Unknown_order order_ref)
      | Some o ->
        let t = adjust_level t o.side o.price (-o.remaining) in
-       Ok { t with orders = IntMap.remove id t.orders })
+       Ok { t with orders = IntMap.remove order_ref t.orders })
 
 let best_bid t = IntMap.max_binding_opt t.bids
 let best_ask t = IntMap.min_binding_opt t.asks

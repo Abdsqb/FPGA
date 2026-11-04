@@ -4,10 +4,10 @@
     being obviously correct over being fast.
 
     Semantics (keep in sync with the team spec):
-    - [Add] inserts a live order. Re-using a live id is an error.
-    - [Executed] and [Cancel] reduce an order's remaining shares. Reducing
+    - [Add_order] inserts a live order. Re-using a live order_ref is an error.
+    - [Order_executed] and [Order_cancel] reduce an order's remaining shares. Reducing
       by more than remain is an error. An order that reaches 0 is removed.
-    - [Delete] removes the order whatever its remaining shares.
+    - [Order_delete] removes the order whatever its remaining shares.
     - Best bid / best ask report the price and the TOTAL shares resting at
       that price level, not the size of a single order. *)
 
@@ -17,7 +17,7 @@ type error =
   | Unknown_order of int
   | Duplicate_order of int
   | Over_reduce of
-      { id : int
+      { order_ref : int
       ; remaining : int
       ; requested : int
       }

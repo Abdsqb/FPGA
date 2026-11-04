@@ -7,29 +7,29 @@ type side =
   | Sell
 
 type t =
-  | Add of
-      { id : int  (** order reference number, 0..4095 by team decision *)
+  | Add_order of
+      { order_ref : int  (** order reference number, 0..4095 by team decision *)
       ; side : side
       ; price : int  (** integer ticks; ITCH Price(4) = 4 implied decimals *)
-      ; qty : int
+      ; shares : int
       }
-  | Executed of
-      { id : int
-      ; qty : int  (** shares executed *)
+  | Order_executed of
+      { order_ref : int
+      ; shares : int  (** shares executed *)
       }
-  | Cancel of
-      { id : int
-      ; qty : int  (** shares cancelled; a partial cancel *)
+  | Order_cancel of
+      { order_ref : int
+      ; shares : int  (** shares cancelled; a partial cancel *)
       }
-  | Delete of { id : int }
+  | Order_delete of { order_ref : int }
 
 let side_to_string = function
   | Buy -> "B"
   | Sell -> "S"
 
 let to_string = function
-  | Add { id; side; price; qty } ->
-    Printf.sprintf "Add      id=%d %s %d @ %d" id (side_to_string side) qty price
-  | Executed { id; qty } -> Printf.sprintf "Executed id=%d qty=%d" id qty
-  | Cancel { id; qty } -> Printf.sprintf "Cancel   id=%d qty=%d" id qty
-  | Delete { id } -> Printf.sprintf "Delete   id=%d" id
+  | Add_order { order_ref; side; price; shares } ->
+    Printf.sprintf "Add_order      order_ref=%d %s %d @ %d" order_ref (side_to_string side) shares price
+  | Order_executed { order_ref; shares } -> Printf.sprintf "Order_executed order_ref=%d shares=%d" order_ref shares
+  | Order_cancel { order_ref; shares } -> Printf.sprintf "Order_cancel   order_ref=%d shares=%d" order_ref shares
+  | Order_delete { order_ref } -> Printf.sprintf "Order_delete   order_ref=%d" order_ref

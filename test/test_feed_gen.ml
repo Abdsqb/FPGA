@@ -12,7 +12,7 @@ let check ~seed ~n ~max_orders =
   let peak = ref 0 in
   for _ = 1 to n do
     let m = Feed_gen.next g in
-    let k = match m with Add _ -> 0 | Executed _ -> 1 | Cancel _ -> 2 | Delete _ -> 3 in
+    let k = match m with Add_order _ -> 0 | Order_executed _ -> 1 | Order_cancel _ -> 2 | Order_delete _ -> 3 in
     counts.(k) <- counts.(k) + 1;
     (match Order_book.apply !book m with
      | Ok b -> book := b
@@ -47,10 +47,10 @@ let%expect_test "same seed, same stream" =
   List.iteri (fun i m -> if i < 6 then print_endline (Msg.to_string m)) a;
   [%expect {|
     true
-    Add      id=0 S 800 @ 1000100
-    Delete   id=0
-    Add      id=0 B 700 @ 999700
-    Executed id=0 qty=412
-    Executed id=0 qty=124
-    Cancel   id=0 qty=130
+    Add_order      order_ref=0 S 800 @ 1000100
+    Order_delete   order_ref=0
+    Add_order      order_ref=0 B 700 @ 999700
+    Order_executed order_ref=0 shares=412
+    Order_executed order_ref=0 shares=124
+    Order_cancel   order_ref=0 shares=130
     |}]

@@ -6,10 +6,10 @@ let%expect_test "byte layout of each message type" =
     (fun m ->
       let b = Itch.encode ~header ~match_number:9 m in
       Printf.printf "%c (%d bytes): %s\n" (Bytes.get b 0) (Bytes.length b) (Itch.to_hex b))
-    [ Msg.Add { id = 0x2A; side = Buy; price = 1_000_100; qty = 300 }
-    ; Executed { id = 0x2A; qty = 100 }
-    ; Cancel { id = 0x2A; qty = 50 }
-    ; Delete { id = 0x2A }
+    [ Msg.Add_order { order_ref = 0x2A; side = Buy; price = 1_000_100; shares = 300 }
+    ; Order_executed { order_ref = 0x2A; shares = 100 }
+    ; Order_cancel { order_ref = 0x2A; shares = 50 }
+    ; Order_delete { order_ref = 0x2A }
     ];
   [%expect {|
     A (36 bytes): 41 00 01 00 00 01 02 03 04 05 06 00 00 00 00 00 00 00 2a 42 00 00 01 2c 54 45 53 54 20 20 20 20 00 0f 42 a4
@@ -26,7 +26,7 @@ let%expect_test "decode rejects bad input" =
   in
   show Bytes.empty;
   show (Bytes.of_string "Zxxxx");
-  show (Bytes.sub (Itch.encode (Delete { id = 1 })) 0 10);
+  show (Bytes.sub (Itch.encode (Order_delete { order_ref = 1 })) 0 10);
   [%expect {|
     error: empty message
     error: unsupported message type 'Z'

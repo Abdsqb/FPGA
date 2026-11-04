@@ -39,32 +39,32 @@ let write_header b typ (h : header) =
 
 let encode ?(header = default_header) ?(match_number = 0) (msg : Msg.t) =
   match msg with
-  | Add { id; side; price; qty } ->
+  | Add_order { order_ref; side; price; shares } ->
     let b = Bytes.create 36 in
     write_header b 'A' header;
-    set_u64 b 11 id;
+    set_u64 b 11 order_ref;
     Bytes.set b 19 (match side with Buy -> 'B' | Sell -> 'S');
-    set_u32 b 20 qty;
+    set_u32 b 20 shares;
     Bytes.blit_string stock 0 b 24 8;
     set_u32 b 32 price;
     b
-  | Executed { id; qty } ->
+  | Order_executed { order_ref; shares } ->
     let b = Bytes.create 31 in
     write_header b 'E' header;
-    set_u64 b 11 id;
-    set_u32 b 19 qty;
+    set_u64 b 11 order_ref;
+    set_u32 b 19 shares;
     set_u64 b 23 match_number;
     b
-  | Cancel { id; qty } ->
+  | Order_cancel { order_ref; shares } ->
     let b = Bytes.create 23 in
     write_header b 'X' header;
-    set_u64 b 11 id;
-    set_u32 b 19 qty;
+    set_u64 b 11 order_ref;
+    set_u32 b 19 shares;
     b
-  | Delete { id } ->
+  | Order_delete { order_ref } ->
     let b = Bytes.create 19 in
     write_header b 'D' header;
-    set_u64 b 11 id;
+    set_u64 b 11 order_ref;
     b
 
 (* --- decode ------------------------------------------------------------- *)
@@ -78,22 +78,22 @@ let decode b =
     | Some n when Bytes.length b <> n ->
       Error (Printf.sprintf "type %C: expected %d bytes, got %d" typ n (Bytes.length b))
     | Some _ ->
-      let id = get_u64 b 11 in
+      let order_ref = get_u64 b 11 in
       (match typ with
        | 'A' ->
          (match Bytes.get b 19 with
           | ('B' | 'S') as s ->
             Ok
-              (Msg.Add
-                 { id
+              (Msg.Add_order
+                 { order_ref
                  ; side = (if s = 'B' then Buy else Sell)
-                 ; qty = get_u32 b 20
+                 ; shares = get_u32 b 20
                  ; price = get_u32 b 32
                  })
           | c -> Error (Printf.sprintf "bad side byte %C" c))
-       | 'E' -> Ok (Msg.Executed { id; qty = get_u32 b 19 })
-       | 'X' -> Ok (Msg.Cancel { id; qty = get_u32 b 19 })
-       | 'D' -> Ok (Msg.Delete { id })
+       | 'E' -> Ok (Msg.Order_executed { order_ref; shares = get_u32 b 19 })
+       | 'X' -> Ok (Msg.Order_cancel { order_ref; shares = get_u32 b 19 })
+       | 'D' -> Ok (Msg.Order_delete { order_ref })
        | _ -> assert false)
 
 (* --- framing ------------------------------------------------------------ *)

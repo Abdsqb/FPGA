@@ -17,8 +17,8 @@ type t =
   ; rng : Random.State.t
   ; live_ids : int array  (** first [n_live] entries are live *)
   ; mutable n_live : int
-  ; slot : int array  (** id -> index in [live_ids], or -1 *)
-  ; remaining : int array  (** id -> shares left *)
+  ; slot : int array  (** order_ref -> index in [live_ids], or -1 *)
+  ; remaining : int array  (** order_ref -> shares left *)
   ; free : int array  (** stack of unused ids *)
   ; mutable n_free : int
   }
@@ -38,26 +38,26 @@ let create cfg =
 
 let live t = t.n_live
 
-let add_live t id qty =
-  t.live_ids.(t.n_live) <- id;
-  t.slot.(id) <- t.n_live;
+let add_live t order_ref shares =
+  t.live_ids.(t.n_live) <- order_ref;
+  t.slot.(order_ref) <- t.n_live;
   t.n_live <- t.n_live + 1;
-  t.remaining.(id) <- qty
+  t.remaining.(order_ref) <- shares
 
-let remove_live t id =
-  let i = t.slot.(id) in
+let remove_live t order_ref =
+  let i = t.slot.(order_ref) in
   let last = t.live_ids.(t.n_live - 1) in
   t.live_ids.(i) <- last;
   t.slot.(last) <- i;
   t.n_live <- t.n_live - 1;
-  t.slot.(id) <- -1;
-  t.remaining.(id) <- 0;
-  t.free.(t.n_free) <- id;
+  t.slot.(order_ref) <- -1;
+  t.remaining.(order_ref) <- 0;
+  t.free.(t.n_free) <- order_ref;
   t.n_free <- t.n_free + 1
 
 let gen_add t =
   t.n_free <- t.n_free - 1;
-  let id = t.free.(t.n_free) in
+  let order_ref = t.free.(t.n_free) in
   let r = t.rng in
   let side : Msg.side = if Random.State.bool r then Buy else Sell in
   let k = 1 + Random.State.int r t.cfg.levels in
@@ -66,23 +66,23 @@ let gen_add t =
     | Buy -> t.cfg.mid - (k * t.cfg.tick)
     | Sell -> t.cfg.mid + (k * t.cfg.tick)
   in
-  let qty = 100 * (1 + Random.State.int r t.cfg.max_lots) in
-  add_live t id qty;
-  Msg.Add { id; side; price; qty }
+  let shares = 100 * (1 + Random.State.int r t.cfg.max_lots) in
+  add_live t order_ref shares;
+  Msg.Add_order { order_ref; side; price; shares }
 
-(* Executed or Cancel: take 1..remaining shares. Taking all of them
+(* Order_executed or Order_cancel: take 1..remaining shares. Taking all of them
    removes the order, exactly as the model does. *)
 let gen_reduce t ~executed =
-  let id = t.live_ids.(Random.State.int t.rng t.n_live) in
-  let rem = t.remaining.(id) in
-  let qty = 1 + Random.State.int t.rng rem in
-  if qty = rem then remove_live t id else t.remaining.(id) <- rem - qty;
-  if executed then Msg.Executed { id; qty } else Msg.Cancel { id; qty }
+  let order_ref = t.live_ids.(Random.State.int t.rng t.n_live) in
+  let rem = t.remaining.(order_ref) in
+  let shares = 1 + Random.State.int t.rng rem in
+  if shares = rem then remove_live t order_ref else t.remaining.(order_ref) <- rem - shares;
+  if executed then Msg.Order_executed { order_ref; shares } else Msg.Order_cancel { order_ref; shares }
 
 let gen_delete t =
-  let id = t.live_ids.(Random.State.int t.rng t.n_live) in
-  remove_live t id;
-  Msg.Delete { id }
+  let order_ref = t.live_ids.(Random.State.int t.rng t.n_live) in
+  remove_live t order_ref;
+  Msg.Order_delete { order_ref }
 
 let next t =
   if t.n_live = 0 then gen_add t
