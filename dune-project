@@ -5,7 +5,7 @@
 (generate_opam_files true)
 
 (source
- (github abdsaqib/feed_handler))
+ (github Abdsqb/FPGA))
 
 (authors "Enes" "CompE teammate" "Abdullah Saqib")
 
