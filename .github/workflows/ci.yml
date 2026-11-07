@@ -18,7 +18,7 @@ jobs:
           dune-cache: true   # caches build results between runs
 
       - name: Install dependencies
-        run: opam install . --deps-only --with-test -y
+        run: opam install . --deps-only --with-test --locked -y
 
       - name: Build
         run: opam exec -- dune build
