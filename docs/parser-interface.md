@@ -1,6 +1,6 @@
 # Parser interface proposal — November 8, 2026
 
-Prepared for Amirlan (CompE), Enes (EE), and Abdulla (CS). The ITCH decoder below is implemented and tested. The MoldUDP64 adapter is a proposed next step. Team sign-off on this boundary is still needed.
+Prepared for Amirlan (CompE), Enes (EE), and Abdulla (CS). The ITCH decoder below is implemented and tested. Its outputs follow Spec v1 ("Parser → order book"): a one-cycle `valid` pulse, `msg_type`, a 64-bit `order_ref`, `side`, `shares` and `price`. The MoldUDP64 adapter is a proposed next step.
 
 ## Boundaries and ownership
 
@@ -10,11 +10,11 @@ Enes: Ethernet / IPv4 / UDP receive and clock crossing
     ▼
 Amirlan: MoldUDP64 adapter [design only, week 2]
     │ strips 20-byte header and each 2-byte message length
-    │ framed ITCH bytes: data / valid / ready / first / last
+    │ framed ITCH bytes: data / valid / first / last
     ▼
 Amirlan: Itch_parser [implemented here]
-    │ kind / order_ref / sell / shares / price / timestamp_ns
-    │ out_valid / out_ready
+    │ valid (one cycle) / msg_type / order_ref[63:0] / side / shares / price
+    │ (+ debug: timestamp_ns / error / filtered)
     ▼
 Amirlan: order table + top of book [future hardware]
 
@@ -36,24 +36,22 @@ All signals use the core clock. Widths refer to unsigned bit vectors. Suggested 
 | `in_first` | 1 | Assert with type byte, offset 0 |
 | `in_last` | 1 | Assert with the actual final byte of this message |
 | `stock_locate` | 16 | Configured target security; latched with the first byte |
-| `out_ready` | 1 | Consumer can accept a decoded message |
 
 | Output | Bits | Contract |
 |---|---:|---|
-| `in_ready` | 1 | Decoder can accept a byte |
-| `out_valid` | 1 | Complete decoded message available |
-| `kind` | 2 | 0 = A, 1 = E, 2 = X, 3 = D |
-| `order_ref` | 12 | Direct table index, after validating all upper 52 wire-ID bits are zero |
-| `sell` | 1 | A: 0 = Buy, 1 = Sell; otherwise zero |
+| `valid` | 1 | High for exactly one cycle per good message (Spec v1) |
+| `msg_type` | 2 | 0 = A, 1 = E, 2 = X, 3 = D |
+| `order_ref` | 64 | The full wire Order Reference Number (Spec v1); the order book uses its low 12 bits as the table index |
+| `side` | 1 | A: 0 = Buy, 1 = Sell; otherwise zero |
 | `shares` | 32 | A: initial shares; E/X: amount to subtract; D: zero |
 | `price` | 32 | A: integer Price(4); otherwise zero |
 | `timestamp_ns` | 48 | Exchange timestamp, retained for debugging |
 | `error` | 3 | One-cycle diagnostic pulse, codes below |
 | `filtered` | 1 | One-cycle pulse for a correctly sized supported message with a different locate |
 
-A transfer happens only on a rising edge with `valid && ready`. The input producer holds data and both boundary flags stable while blocked. A bubble (`in_valid=0`) advances nothing. The output payload is meaningful only with `out_valid=1`; all its fields remain stable until accepted. The decoder does not accept input in Validate or Emit, including the output-acceptance cycle. During `clear`, both ready and valid are masked low.
+There is no backpressure, as in Spec v1. A byte is taken on every rising edge where `in_valid=1`; a bubble (`in_valid=0`) advances nothing. The decoder accepts input in every state, including the Validate cycle in which it reports the previous message, so back-to-back messages arrive with no gap (tested: 1,000 messages, one byte per cycle). Output fields are meaningful only in the cycle where `valid=1`; the order book must capture them in that cycle. During `clear`, `valid` is masked low.
 
-Error codes: **1** missing first or unexpected first within a message; **2** incorrect length or more than 36 bytes; **3** unsupported type; **4** invalid A side byte; **5** ID exceeds 4095. Errors are pulses without a ready handshake; an integrating module should count or latch them. Foreign-stock filtering precedes side/ID validation. Errors never emit an order-book update.
+Error codes: **1** missing first or unexpected first within a message; **2** incorrect length or more than 36 bytes; **3** unsupported type; **4** invalid A side byte. Errors are one-cycle pulses, one cycle after the bad message ends; an integrating module should count or latch them. Foreign-stock filtering precedes side validation. Order refs are not range-checked here: Spec v1 passes all 64 bits and the book uses the low 12, which is safe because the generator only issues refs 0–4,095. Errors never emit an order-book update.
 
 An oversized or misframed message drains through the next accepted `in_last`. If a producer abandons a partial message without sending `in_last`, the adapter must reset/flush the decoder before restarting. Unknown messages of more than 36 bytes receive the oversize diagnostic. These are prototype diagnostics, not a complete Nasdaq error taxonomy.
 
@@ -66,13 +64,10 @@ An oversized or misframed message drains through the next accepted `in_last`. If
            │ first and last together          │ final byte accepted
            └────────────────┐                 │
                             ▼                 ▼
-                           VALIDATE
-                           │      │
-               bad/filter │      │ good selected A/E/X/D
-                           ▼      ▼
-                          IDLE   EMIT ── out_ready ──► IDLE
-                                  │
-                                  └── hold output while !out_ready
+                           VALIDATE ── valid = 1 for this one cycle if good
+                              │
+                              ├── next byte is a new first byte ──► COLLECT (no gap)
+                              └── otherwise ──────────────────────► IDLE
 
  Missing/unexpected first or >36 bytes ──► DRAIN ── accepted last ──► IDLE
  clear from any state ──► IDLE
@@ -84,18 +79,18 @@ Supported lengths are A=36, E=31, X=23, D=19. All use the ID at offsets 11–18.
 
 ## Model handoff
 
-On `out_valid && out_ready`, build exactly one `Model.Msg.t`:
+On each cycle with `valid=1`, build exactly one `Model.Msg.t`:
 
-| kind | Variant |
+| msg_type | Variant |
 |---:|---|
-| 0 | `Add_order { order_ref; side = (if sell then Sell else Buy); shares; price }` |
+| 0 | `Add_order { order_ref; side = (if side = 1 then Sell else Buy); shares; price }` |
 | 1 | `Order_executed { order_ref; shares }` |
 | 2 | `Order_cancel { order_ref; shares }` |
 | 3 | `Order_delete { order_ref }` |
 
-The reference implementation is `decoded` in `hw/test/test_itch_parser.ml`. On the current 64-bit OCaml platform, all emitted fields fit positive OCaml integers. The hardware checks the full 64-bit wire ID before converting it to 12 bits. Do not truncate arbitrary real IDs into slots.
+The reference implementation is `decoded` in `hw/test/test_itch_parser.ml`. The generator's refs (0–4,095) fit OCaml integers. The decoder passes the full 64-bit wire ID; narrowing to a 12-bit table index happens in the order book, per Spec v1. Real Nasdaq IDs would alias slots, which is why hashing them is a stretch goal.
 
-Duplicate live IDs, unknown IDs, over-reduction, zero quantities, and price-domain rules belong to order-book validation. This decoder checks encoding, framing, side, selected locate, and the synthetic ID range. It does not claim to implement the full book or full real-market feed semantics.
+Duplicate live IDs, unknown IDs, over-reduction, zero quantities, and price-domain rules belong to order-book validation. This decoder checks encoding, framing, side and selected locate. It does not claim to implement the full book or full real-market feed semantics.
 
 ## Proposed MoldUDP64 adapter state machine
 
@@ -115,11 +110,11 @@ Track session and expected sequence. A gap or duplicate/out-of-order packet must
 
 ## Timing and current validation
 
-After the final accepted byte at edge L, `out_valid` rises after edge L+1. With the consumer ready, the earliest transfer is edge L+2. An unstalled message occupies N+2 input scheduling cycles, so consecutive A starts are 38 cycles apart. Bubbles and output stalls add time. These are decoder timings, not board-to-UART or end-to-end measurements.
+After the final byte at edge L, `valid` is high for the one cycle after edge L (the Validate state) and low again after edge L+1. The next message's first byte can arrive in that same cycle, so an N-byte message occupies exactly N input cycles and consecutive Add Orders can start 36 cycles apart. Bubbles add time. These are decoder timings, not board-to-UART or end-to-end measurements.
 
 Use a local cycle counter to measure first-input-transfer to book-update completion; report input stalls and consumer stalls separately. The exchange timestamp is not a local cycle counter and cannot establish FPGA processing latency by itself. Neither board timing closure nor constant end-to-end latency has been demonstrated.
 
-Verified locally: `dune build`, `dune test`, a waveform demo, and Verilog generation. Tests include the literal reading-guide AAPL vector, all four message types, unsigned quantities, ID bounds, stalls, malformed lengths/boundaries, foreign locate, reset, and 10,000 generated messages. The randomized test compares decoded messages and applies both streams to the software order book; it does **not** test hardware order-book storage.
+Verified locally: `dune build`, `dune test`, a waveform demo, and Verilog generation. Tests include the literal reading-guide AAPL vector, all four message types, unsigned quantities, full 64-bit order refs, input bubbles, back-to-back messages with no gaps, malformed lengths/boundaries, foreign locate, reset, and 10,000 generated messages. The randomized test compares decoded messages and applies both streams to the software order book; it does **not** test hardware order-book storage.
 
 ## Sources
 

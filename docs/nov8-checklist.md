@@ -6,7 +6,7 @@ This checklist records completed artifacts and executed checks for the four Amir
 |---|---|---|
 | Work through Hardcaml examples: counter, Always state machine, waveform viewer | Complete worked-example set, executed | [Walkthrough](hardcaml-worked-examples.md); [Always circuit](../hw/always_example.ml); counter and Always expect tests; [saved demo](evidence/learning-demo.txt). Nov 5 extended target slipped; deliverables completed Nov 8. |
 | Sketch parser state machine on paper | Complete printable sketch | [One-page PDF](parser-state-machine.pdf), with [source](render_parser_sketch.py); [full decoder and transport FSM notes](parser-interface.md). Nov 5 extended target slipped; sketch completed Nov 8. Printing or handwriting is a physical step, not claimed here. |
-| Define parser Hardcaml inputs and outputs | Complete implementation and contract | [Typed ports](../hw/itch_parser.ml) and [interface contract](parser-interface.md), including widths, framing, reset, handshakes and error codes. Team agreement and integration remain review steps. |
+| Define parser Hardcaml inputs and outputs | Complete implementation and contract | [Typed ports](../hw/itch_parser.ml) and [interface contract](parser-interface.md), including widths, framing, reset and error codes. Outputs aligned to Spec v1 on Nov 8 (one-cycle `valid`, 64-bit `order_ref`, `msg_type`/`side` names). |
 | Stretch: testbench feeding the 36-byte Add Order example | Complete and passing | [Literal-vector test and regression](../hw/test/test_itch_parser.ml); [demo output](evidence/parser-demo.txt). All four types plus 10,000 generator messages checked. |
 
 ## Completion checks
@@ -17,8 +17,8 @@ This checklist records completed artifacts and executed checks for the four Amir
 - [x] Printable FSM sketch generated and visually reviewed.
 - [x] Parser input/output contract matches implemented port types.
 - [x] Literal 36-byte AAPL Add decodes as ref 42, Buy, 100 shares, price 1,502,500.
-- [x] Input bubbles and output backpressure preserve fields and transaction count.
-- [x] Invalid lengths, boundaries, side and full-width out-of-range IDs reject without book updates.
+- [x] Input bubbles preserve fields and message count; back-to-back messages decode with no gaps.
+- [x] Invalid lengths, boundaries and side reject without book updates; full 64-bit order refs pass through (Spec v1).
 - [x] Reset flushes partial and pending messages; foreign stock is filtered.
 - [x] 10,000 generated messages agree with the existing encoder/model.
 - [x] Full build/tests and Verilog generation pass.
@@ -29,7 +29,7 @@ See [validation.txt](evidence/validation.txt) for commands and environment. Run 
 
 The decoder accepts already framed ITCH message bodies, not complete UDP packets. MoldUDP64 hardware framing, hardware order-table/top-of-book implementation, CDC testing, synthesis, timing closure and board bring-up are future stages. The generated-message regression uses the software order book for both streams; it does not prove a hardware book exists.
 
-Proposed ownership: Enes supplies validated UDP payloads and packet/error boundaries after clock crossing; Amirlan implements MoldUDP64 framing and this decoder; Abdulla consumes the typed output handshake in his checker. Approve that boundary at the meeting.
+Proposed ownership: Enes supplies validated UDP payloads and packet/error boundaries after clock crossing; Amirlan implements MoldUDP64 framing and this decoder; Abdulla consumes the Spec v1 parser outputs in his checker. Approve that boundary at the meeting.
 
 Shared Everyone rows are distinct from these four assigned deliverables. The recorded toolchain/counter and ITCH reading statuses were already Done. Real World OCaml reading remains personal work to confirm; spec-review comments are included below for the team, not posted to the shared artifact.
 

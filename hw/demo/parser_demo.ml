@@ -23,26 +23,26 @@ let () =
         ~header:{ stock_locate = 1; tracking = 0; timestamp_ns = 34_200_000_000_000 } msg in
     Bytes.blit_string "AAPL    " 0 bytes 24 8;
     Printf.printf "36-byte Add Order: %s\n" (Model.Itch.to_hex bytes);
+    let pulses = ref 0 in
+    let step () =
+      Cyclesim.cycle sim;
+      if value o.valid = 1 then begin
+        incr pulses;
+        Printf.printf "Decoded: msg_type=%d order_ref=%d side=%d shares=%d price=%d timestamp_ns=%d\n"
+          (value o.msg_type) (value o.order_ref) (value o.side) (value o.shares)
+          (value o.price) (value o.timestamp_ns)
+      end
+    in
     Bytes.iteri (fun n c ->
-      assert (value o.in_ready = 1);
       i.in_valid := Bits.vdd;
       i.in_data := Bits.of_int ~width:8 (Char.code c);
       i.in_first := bit (n = 0);
       i.in_last := bit (n = 35);
-      Cyclesim.cycle sim) bytes;
+      step ()) bytes;
     i.in_valid := Bits.gnd;
     i.in_first := Bits.gnd;
     i.in_last := Bits.gnd;
-    Cyclesim.cycle sim;
-    assert (value o.out_valid = 1);
-    Printf.printf "Decoded: kind=%d ref=%d sell=%d shares=%d price=%d timestamp_ns=%d\n"
-      (value o.kind) (value o.order_ref) (value o.sell) (value o.shares)
-      (value o.price) (value o.timestamp_ns);
-    for _ = 1 to 3 do Cyclesim.cycle sim done;
-    i.out_ready := Bits.vdd;
-    Cyclesim.cycle sim;
-    assert (value o.out_valid = 0);
-    Cyclesim.cycle sim;
-    print_endline "Output held for 3 extra cycles, then accepted exactly once.";
+    for _ = 1 to 4 do step () done;
+    Printf.printf "valid pulsed %d time(s), for one cycle, as in Spec v1.\n" !pulses;
     Hardcaml_waveterm.Waveform.print
       ~wave_width:0 ~display_width:140 ~display_height:50 waves)
