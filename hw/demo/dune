@@ -1,0 +1,3 @@
+(executables
+ (names parser_demo learning_demo)
+ (libraries hw model hardcaml hardcaml_waveterm))

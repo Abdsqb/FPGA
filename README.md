@@ -5,6 +5,18 @@ subset of Nasdaq ITCH 5.0 over Ethernet/UDP, parses it in hardware, keeps
 the order table in block RAM, and outputs best bid / best ask with latency
 measured in clock cycles.
 
+## November 8 CompE deliverables
+
+The [Amirlan checklist](docs/nov8-checklist.md) links the worked Hardcaml
+examples, printable parser state-machine sketch, implemented ITCH decoder,
+interface contract and tests. The decoder handles framed A/E/X/D bodies;
+MoldUDP64 hardware framing and the hardware order book remain future work.
+
+```sh
+opam exec --switch=fh -- dune exec hw/demo/learning_demo.exe
+opam exec --switch=fh -- dune exec hw/demo/parser_demo.exe
+```
+
 ## How the repo is divided
 
 Each person owns one part from start to finish and works mostly in their
@@ -19,17 +31,17 @@ whole design.
 | `model/` | Reference model (the answer key), message types, ITCH 5.0 format, random feed generator | Done |
 | `test/` | Tests for everything in `model/` | Done |
 | `bin/` | `gen_feed`: writes the feed files every stage uses | Done |
-| `hw/test/` | Testbench: runs the chip simulation and compares it against the model after every message | Next, once the parser exists |
+| `hw/test/` | Parser/model regression and hardware learning examples; full hardware-book comparison planned | Parser tests available; book comparison next |
 | `.github/workflows/` | CI: builds and tests every push and pull request | Done |
 | `README.md`, `dune-project`, `feed_handler.opam.locked` | Setup guide, project settings, pinned library versions | Done |
 
 Also: reviews every pull request, runs the repo.
 
-### CompE teammate: the chip's logic, in Hardcaml
+### Amirlan (CompE): the chip's logic, in Hardcaml
 
 | Folder | What goes in it | Status |
 |---|---|---|
-| `hw/` | Message parser, order table in block RAM, best bid / best ask logic (only the practice counter is there now) | Starting |
+| `hw/` | Framed ITCH decoder and learning examples; BRAM order table and top-of-book logic planned | Decoder implemented and simulated; book next |
 
 Also: leads the digital-logic crash course.
 
@@ -76,7 +88,7 @@ model/              pure OCaml, no hardware
   mold.ml             MoldUDP64 packets: 20-byte header + length-prefixed messages
   feed_gen.ml         random generator of valid message streams
 test/               expect tests + randomized tests for model/
-hw/                 Hardcaml designs (counter now; parser + book later)
+hw/                 Hardcaml counter, Always example and ITCH decoder; book later
 hw/test/            hardware simulations and the testbench
 board/              board bring-up: Ethernet, clocks, UART, constraints, Vivado
 bin/gen_feed.ml     writes a feed file used by every stage

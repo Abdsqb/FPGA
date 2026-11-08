@@ -1,6 +1,6 @@
 (library
  (name hw_tests)
- (libraries hw hardcaml hardcaml_waveterm)
+ (libraries hw model hardcaml hardcaml_waveterm)
  (inline_tests)
  (preprocess
   (pps ppx_jane)))
