@@ -1,5 +1,5 @@
-; Hardware designs written in Hardcaml. Right now: the homework counter.
-; The parser, order table and top-of-book logic (CompE teammate) go here.
+; Hardcaml learning examples and framed ITCH decoder.
+; The order table and top-of-book logic will be added here.
 
 (library
  (name hw)
