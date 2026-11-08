@@ -1,85 +1,92 @@
-# Parser interface proposal — November 8, 2026
+# Parser interface — matches Spec v1
 
-Prepared for Amirlan (CompE), Enes (EE), and Abdulla (CS). The ITCH decoder below is implemented and tested. Its outputs follow Spec v1 ("Parser → order book"): a one-cycle `valid` pulse, `msg_type`, a 64-bit `order_ref`, `side`, `shares` and `price`. The MoldUDP64 adapter is a proposed next step.
+Prepared for Amirlan (CompE), Enes (EE), and Abdulla (CS). Updated November 8, 2026 to match Spec v1: the parser takes the spec's single byte stream (the UDP payload) and produces the spec's "Parser → order book" signals, with no extra ports. Implemented in `hw/itch_parser.ml` and `hw/mold_deframer.ml`; tested in `hw/test/test_itch_parser.ml`.
 
-## Boundaries and ownership
+## Where it sits
 
 ```text
 Enes: Ethernet / IPv4 / UDP receive and clock crossing
-    │ validated UDP payload, packet boundaries, loss/error indication
+    │ UDP payload: in_data[7:0] / in_valid / in_last (last byte of the payload)
     ▼
-Amirlan: MoldUDP64 adapter [design only, week 2]
-    │ strips 20-byte header and each 2-byte message length
-    │ framed ITCH bytes: data / valid / first / last
-    ▼
-Amirlan: Itch_parser [implemented here]
+Itch_parser  (hw/itch_parser.ml)
+    ├─ Mold_deframer: strips the 20-byte MoldUDP64 header and each 2-byte length,
+    │                 marks each ITCH message's first/last byte (internal signals)
+    └─ decoder:       collects one message, checks it, pulses valid
     │ valid (one cycle) / msg_type / order_ref[63:0] / side / shares / price
-    │ (+ debug: timestamp_ns / error / filtered)
     ▼
 Amirlan: order table + top of book [future hardware]
 
 Abdulla: encoder + feed generator + reference model + comparison tests
 ```
 
-`hw/itch_parser.ml` accepts one ITCH body at a time. Do not feed it a MoldUDP64 header, a two-byte length prefix, Ethernet headers, or raw MII nibbles. The raw Add Order example is exactly 36 input transfers. `Model.Itch.encode` supplies a body; `Model.Itch.frame` adds a prefix and therefore cannot be sent directly to this decoder.
+## Ports
 
-## Implemented ports
+All signals use the core clock.
 
-All signals use the core clock. Widths refer to unsigned bit vectors. Suggested board frequency is 100 MHz; no clock frequency is required by the simulation.
-
-| Input | Bits | Contract |
+| Input | Bits | Meaning |
 |---|---:|---|
 | `clock` | 1 | Rising-edge core clock |
-| `clear` | 1 | Synchronous active-high reset; discards partial and pending messages |
-| `in_data` | 8 | One ITCH byte, in network order |
-| `in_valid` | 1 | Producer offers a byte |
-| `in_first` | 1 | Assert with type byte, offset 0 |
-| `in_last` | 1 | Assert with the actual final byte of this message |
-| `stock_locate` | 16 | Configured target security; latched with the first byte |
+| `clear` | 1 | Synchronous reset; drops any partial packet or message |
+| `in_data` | 8 | One byte of the UDP payload, in network order |
+| `in_valid` | 1 | A byte is on `in_data` this cycle |
+| `in_last` | 1 | This is the last byte of the UDP payload |
 
-| Output | Bits | Contract |
+| Output | Bits | Meaning (Spec v1) |
 |---|---:|---|
-| `valid` | 1 | High for exactly one cycle per good message (Spec v1) |
-| `msg_type` | 2 | 0 = A, 1 = E, 2 = X, 3 = D |
-| `order_ref` | 64 | The full wire Order Reference Number (Spec v1); the order book uses its low 12 bits as the table index |
-| `side` | 1 | A: 0 = Buy, 1 = Sell; otherwise zero |
-| `shares` | 32 | A: initial shares; E/X: amount to subtract; D: zero |
-| `price` | 32 | A: integer Price(4); otherwise zero |
-| `timestamp_ns` | 48 | Exchange timestamp, retained for debugging |
-| `error` | 3 | One-cycle diagnostic pulse, codes below |
-| `filtered` | 1 | One-cycle pulse for a correctly sized supported message with a different locate |
+| `valid` | 1 | High for exactly one cycle per good message |
+| `msg_type` | 2 | 0 = Add, 1 = Executed, 2 = Cancel, 3 = Delete |
+| `order_ref` | 64 | The full wire Order Reference Number; the order book uses its low 12 bits as the table index |
+| `side` | 1 | Add: 0 = buy, 1 = sell; otherwise 0 |
+| `shares` | 32 | Add: order size; Executed/Cancel: shares removed; Delete: 0 |
+| `price` | 32 | Add: price in ITCH units ($0.0001); otherwise 0 |
 
-There is no backpressure, as in Spec v1. A byte is taken on every rising edge where `in_valid=1`; a bubble (`in_valid=0`) advances nothing. The decoder accepts input in every state, including the Validate cycle in which it reports the previous message, so back-to-back messages arrive with no gap (tested: 1,000 messages, one byte per cycle). Output fields are meaningful only in the cycle where `valid=1`; the order book must capture them in that cycle. During `clear`, `valid` is masked low.
+The inputs carry an `in_` prefix only so their names don't clash with the output `valid`; they are the spec's `data`, `valid` and `last`.
 
-Error codes: **1** missing first or unexpected first within a message; **2** incorrect length or more than 36 bytes; **3** unsupported type; **4** invalid A side byte. Errors are one-cycle pulses, one cycle after the bad message ends; an integrating module should count or latch them. Foreign-stock filtering precedes side validation. Order refs are not range-checked here: Spec v1 passes all 64 bits and the book uses the low 12, which is safe because the generator only issues refs 0–4,095. Errors never emit an order-book update.
+**Stock Locate** is a build-time setting (`Itch_parser.create ~stock_locate`, default 1), not a port. Only messages whose Stock Locate matches are passed on. Our generator and encoder use 1; the spec should record that value.
 
-An oversized or misframed message drains through the next accepted `in_last`. If a producer abandons a partial message without sending `in_last`, the adapter must reset/flush the decoder before restarting. Unknown messages of more than 36 bytes receive the oversize diagnostic. These are prototype diagnostics, not a complete Nasdaq error taxonomy.
+There is no backpressure, as in Spec v1: a byte is taken on every cycle with `in_valid = 1`. Output fields are meaningful only in the cycle where `valid = 1`; the order book must capture them then.
 
-## Decoder state-machine sketch
+## What is checked, and what is dropped
+
+A message produces no `valid` pulse if its type isn't A/E/X/D, its length is wrong for its type (A 36, E 31, X 23, D 19), its Stock Locate doesn't match, or an Add's side byte isn't `B`/`S`. Dropping is silent; the next message is unaffected. Order refs are not range-checked: Spec v1 passes all 64 bits and the book uses the low 12, which is safe because the generator only issues refs 0–4,095.
+
+Book-level bad input (unknown ref, price outside the window, over-reduction; Spec v1 rule 4) is the order book's job, not the parser's.
+
+## MoldUDP64 deframer (cut-through)
 
 ```text
-                  first byte accepted
-         IDLE ───────────────────────────► COLLECT
-           │                                  │
-           │ first and last together          │ final byte accepted
-           └────────────────┐                 │
-                            ▼                 ▼
-                           VALIDATE ── valid = 1 for this one cycle if good
-                              │
-                              ├── next byte is a new first byte ──► COLLECT (no gap)
-                              └── otherwise ──────────────────────► IDLE
-
- Missing/unexpected first or >36 bytes ──► DRAIN ── accepted last ──► IDLE
- clear from any state ──► IDLE
+HEADER (20 bytes) → LEN_HI → LEN_LO → BODY (length bytes) ─┐
+   ▲                   ▲                                   │
+   │                   └──── more messages in the packet ──┘
+   └── in_last: end of packet (back to HEADER for the next one)
 ```
 
-Collect stores up to 36 bytes in registers. A six-bit byte counter increments only on input transfer. Validation happens one clock after the last byte is stored, so the final byte is available before fields are inspected. This deliberately avoids reading the previous value of a register on its write edge.
+A 20-byte packet (heartbeat, or end of session) carries no messages. An empty block (length 0) is skipped. If a packet ends in the middle of a message, that message is dropped (`abort` resets the decoder).
 
-Supported lengths are A=36, E=31, X=23, D=19. All use the ID at offsets 11–18. A uses side at 19, shares at 20–23, and price at 32–35. E/X use shares at 19–22. Numeric fields concatenate their bytes most-significant first. Tracking, symbol text, and E match number are consumed but not emitted. Locate filtering assumes the team has configured the locate-to-symbol mapping; it does not discover that mapping from Stock Directory messages.
+**Cut-through:** every byte is passed on in the same cycle it arrives; nothing is buffered, so the deframer adds no latency. **Accuracy note, to revisit:** messages reach the book before the end of their packet is seen, so a packet that turns out bad at its end (truncated, or flagged by rxerr / FIFO overflow once those exist) may already have updated the book with its earlier messages. Store-and-forward (buffer, check, then replay) would prevent that, at the cost of up to 1,472 × 8 = 11,776 cycles (about 118 µs) for a full packet. The header's sequence number and message count are not checked yet, so a lost packet goes unnoticed. These caveats are marked with `NOTE (accuracy, revisit later)` in `hw/mold_deframer.ml`.
+
+## Decoder state machine
+
+```text
+                  first byte
+         IDLE ─────────────────► COLLECT
+           │                        │ last byte
+           │ first and last together│
+           └──────────────┐         ▼
+                          ▼
+                        VALIDATE ── valid = 1 for this one cycle if good
+                          │
+                          └──────────────────────────► IDLE
+
+ Unexpected first, missing first, or more than 36 bytes ──► DRAIN ── last ──► IDLE
+ clear (or a deframer abort) from any state ──► IDLE
+```
+
+Collect stores up to 36 bytes in registers. Validation happens one clock after the last byte is stored, so the final byte is available before fields are inspected. Numeric fields are read most-significant byte first.
 
 ## Model handoff
 
-On each cycle with `valid=1`, build exactly one `Model.Msg.t`:
+On each cycle with `valid = 1`, build exactly one `Model.Msg.t`:
 
 | msg_type | Variant |
 |---:|---|
@@ -88,33 +95,13 @@ On each cycle with `valid=1`, build exactly one `Model.Msg.t`:
 | 2 | `Order_cancel { order_ref; shares }` |
 | 3 | `Order_delete { order_ref }` |
 
-The reference implementation is `decoded` in `hw/test/test_itch_parser.ml`. The generator's refs (0–4,095) fit OCaml integers. The decoder passes the full 64-bit wire ID; narrowing to a 12-bit table index happens in the order book, per Spec v1. Real Nasdaq IDs would alias slots, which is why hashing them is a stretch goal.
-
-Duplicate live IDs, unknown IDs, over-reduction, zero quantities, and price-domain rules belong to order-book validation. This decoder checks encoding, framing, side and selected locate. It does not claim to implement the full book or full real-market feed semantics.
-
-## Proposed MoldUDP64 adapter state machine
-
-```text
-WAIT_PACKET → HEADER[20] → LENGTH_HI → LENGTH_LO → BODY[length]
-                             ▲                       │
-                             └── more blocks ────────┘
-                          last block → EXPECT_PACKET_END → WAIT_PACKET
-malformed / sequence mismatch → DROP_REMAINDER → WAIT_PACKET (book invalid)
-```
-
-Parse the session, sequence, and count; do not blindly skip all 20 header bytes. Count 0 is heartbeat; 65535 is end-of-session. Those have no data messages. A normal length excludes the two length bytes themselves. Mold permits zero-length blocks; this ITCH subset rejects them as containing no type byte. Each body's first/last flags derive from its length counter, not from the UDP packet boundary. Count every block for sequence tracking, including unsupported or filtered messages.
-
-Validate that declared lengths and message count fit the packet and that no bytes remain afterward. Carry packet boundaries and receive-error/overflow information across the clock crossing. For the first implementation, buffer and validate an entire UDP payload before replaying its bodies; then a late framing/FCS error cannot silently commit part of a corrupt packet. Agree buffer capacity, oversized-datagram rejection, and checksum ownership with Enes. A streaming design would instead need explicit book invalidation/recovery after late errors; it cannot undo already accepted updates for free.
-
-Track session and expected sequence. A gap or duplicate/out-of-order packet must not be applied as if fresh; stop valid quote publication and report it. Retransmission/recovery is a later feature. If upstream FIFO overflow occurs, invalidate the book rather than silently dropping bytes. Ready/valid only backpressures buffered logic; Ethernet traffic itself does not stop because this decoder is busy.
+The reference implementation is `decoded` in `hw/test/test_itch_parser.ml`.
 
 ## Timing and current validation
 
-After the final byte at edge L, `valid` is high for the one cycle after edge L (the Validate state) and low again after edge L+1. The next message's first byte can arrive in that same cycle, so an N-byte message occupies exactly N input cycles and consecutive Add Orders can start 36 cycles apart. Bubbles add time. These are decoder timings, not board-to-UART or end-to-end measurements.
+After a message's last byte at clock edge L, `valid` is high for the one cycle after edge L. With cut-through deframing, that is the parser's whole delay: 1 cycle after the message's last byte. Between messages in a packet, the 2 length bytes give the decoder time to finish, so packets can arrive back to back with no idle cycles.
 
-Use a local cycle counter to measure first-input-transfer to book-update completion; report input stalls and consumer stalls separately. The exchange timestamp is not a local cycle counter and cannot establish FPGA processing latency by itself. Neither board timing closure nor constant end-to-end latency has been demonstrated.
-
-Verified locally: `dune build`, `dune test`, a waveform demo, and Verilog generation. Tests include the literal reading-guide AAPL vector, all four message types, unsigned quantities, full 64-bit order refs, input bubbles, back-to-back messages with no gaps, malformed lengths/boundaries, foreign locate, reset, and 10,000 generated messages. The randomized test compares decoded messages and applies both streams to the software order book; it does **not** test hardware order-book storage.
+Verified: `dune build`, `dune test`, the waveform demo, and Verilog generation. Tests feed real MoldUDP64 packets built with `Model.Mold` and cover the reading guide's AAPL vector, all four message types in one packet, full 64-bit order refs, heartbeat and end-of-session packets, bad types/sides/lengths, other-stock messages, truncated packets, reset mid-packet, 1,000 messages back to back with no gaps, and 10,000 generated messages compared against the software order book after every message. The hardware order book itself is not built yet.
 
 ## Sources
 

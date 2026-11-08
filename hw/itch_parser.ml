@@ -1,15 +1,24 @@
-(* One framed ITCH message at a time; see docs/parser-interface.md.
-   The MoldUDP64 adapter is a separate, not-yet-implemented module.
+(* ITCH parser, matching Spec v1.
 
-   Outputs follow Spec v1, "Parser -> order book":
+   Input, Spec v1 "byte stream": the UDP payload (MoldUDP64 packets), one
+   byte per cycle. in_data / in_valid / in_last (last byte of the payload).
+   The in_ prefix only keeps these names apart from the output [valid].
+
+   Output, Spec v1 "Parser -> order book":
      valid (one cycle per message), msg_type[1:0] (0 Add, 1 Executed,
      2 Cancel, 3 Delete), order_ref[63:0], side (0 buy, 1 sell; Add only),
-     shares[31:0], price[31:0] (Add only).
-   timestamp_ns, error and filtered are extra debug outputs.
+     shares[31:0] (Add: size; Executed/Cancel: shares removed; Delete: 0),
+     price[31:0] (Add only).
 
-   There is no backpressure, as in the spec: the parser accepts a byte on
-   every cycle, including the cycle in which it reports the previous
-   message, so back-to-back messages never stall. *)
+   Inside: Mold_deframer strips the packet header and message lengths and
+   marks each message's first/last byte; the decoder below collects one
+   message, checks it and pulses [valid]. Bad or other-stock messages are
+   dropped silently: no valid pulse.
+
+   [clear] is a synchronous reset (Spec v1 sets the base price "at reset").
+   [stock_locate] is a build-time setting, not a port: only messages for this
+   stock are passed on. It must match what the feed sends (our generator and
+   encoder use 1). *)
 open! Hardcaml
 open Signal
 
@@ -17,11 +26,9 @@ module I = struct
   type 'a t =
     { clock : 'a
     ; clear : 'a
-    ; in_valid : 'a
     ; in_data : 'a [@bits 8]
-    ; in_first : 'a
+    ; in_valid : 'a
     ; in_last : 'a
-    ; stock_locate : 'a [@bits 16]
     }
   [@@deriving hardcaml]
 end
@@ -34,9 +41,6 @@ module O = struct
     ; side : 'a
     ; shares : 'a [@bits 32]
     ; price : 'a [@bits 32]
-    ; timestamp_ns : 'a [@bits 48]
-    ; error : 'a [@bits 3]
-    ; filtered : 'a
     }
   [@@deriving hardcaml]
 end
@@ -46,15 +50,13 @@ module States = struct
   [@@deriving compare, enumerate, sexp_of]
 end
 
-let create (i : _ I.t) : _ O.t =
+(* One ITCH message at a time, framed by [first] / [last]. *)
+let decode ~stock_locate ~clock ~clear ~valid ~data ~first ~last : _ O.t =
   let open Always in
-  let spec = Reg_spec.create ~clock:i.clock ~clear:i.clear () in
+  let spec = Reg_spec.create ~clock ~clear () in
   let sm = State_machine.create (module States) spec in
   let count = Variable.reg spec ~width:6 in
   let bytes = Array.init 36 (fun _ -> Variable.reg spec ~width:8) in
-  let selected_locate = Variable.reg spec ~width:16 in
-  let error = Variable.reg spec ~width:3 in
-  let filtered = Variable.reg spec ~width:1 in
   let field off len =
     concat_msb (List.init len (fun n -> bytes.(off + n).value))
   in
@@ -68,67 +70,57 @@ let create (i : _ I.t) : _ O.t =
     |: (is_x &: (count.value ==:. 23))
     |: (is_d &: (count.value ==:. 19))
   in
-  let locate_ok = field 1 2 ==: selected_locate.value in
+  let locate_ok = field 1 2 ==:. stock_locate in
   let side_ok = ~:is_a |: (field 19 1 ==:. 0x42) |: (field 19 1 ==:. 0x53) in
   let good = supported &: length_ok &: locate_ok &: side_ok in
-  let fire = i.in_valid &: ~:(i.clear) in
-  let drain code =
-    [ error <--. code; if_ i.in_last [ sm.set_next Idle ] [ sm.set_next Drain ] ]
-  in
-  (* Accept the first byte of a new message, or drain a stray byte. Used in
-     Idle, and in Validate so the next message can start with no gap: the
-     byte registers only change at the end of this cycle, so the message
-     being reported is still intact while the new one begins. *)
+  let drain = if_ last [ sm.set_next Idle ] [ sm.set_next Drain ] in
+  (* Used in Idle and in Validate: the byte registers only change at the end
+     of the cycle, so the message being reported stays intact while the next
+     one begins. *)
   let start_or_drain =
-    when_ fire
-      [ if_ i.in_first
-          [ bytes.(0) <-- i.in_data
+    when_ valid
+      [ if_ first
+          [ bytes.(0) <-- data
           ; count <--. 1
-          ; selected_locate <-- i.stock_locate
-          ; if_ i.in_last [ sm.set_next Validate ] [ sm.set_next Collect ]
+          ; if_ last [ sm.set_next Validate ] [ sm.set_next Collect ]
           ]
-          (drain 1)
+          [ drain ]
       ]
   in
   compile
-    [ error <--. 0
-    ; filtered <--. 0
-    ; sm.switch
+    [ sm.switch
         [ Idle, [ start_or_drain ]
-        ; Collect,
-          [ when_ fire
-              [ if_ i.in_first (drain 1)
-                  [ if_ (count.value ==:. 36) (drain 2)
-                      [ proc
-                          (List.init 36 (fun n ->
-                             when_ (count.value ==:. n) [ bytes.(n) <-- i.in_data ]))
-                      ; count <-- count.value +:. 1
-                      ; when_ i.in_last [ sm.set_next Validate ]
-                      ]
-                  ]
-              ]
-          ]
-        ; Validate,
-          [ if_ ~:supported [ error <--. 3 ]
-              [ if_ ~:length_ok [ error <--. 2 ]
-                  [ if_ ~:locate_ok [ filtered <--. 1 ]
-                      [ when_ ~:side_ok [ error <--. 4 ] ]
-                  ]
-              ]
-          ; sm.set_next Idle
-          ; start_or_drain
-          ]
-        ; Drain, [ when_ (fire &: i.in_last) [ sm.set_next Idle ] ]
+        ; ( Collect
+          , [ when_ valid
+                [ if_ first [ drain ]
+                    [ if_ (count.value ==:. 36) [ drain ] (* longer than any message we handle *)
+                        [ proc
+                            (List.init 36 (fun n ->
+                               when_ (count.value ==:. n) [ bytes.(n) <-- data ]))
+                        ; count <-- count.value +:. 1
+                        ; when_ last [ sm.set_next Validate ]
+                        ]
+                    ]
+                ]
+            ] )
+        ; Validate, [ sm.set_next Idle; start_or_drain ]
+        ; Drain, [ when_ (valid &: last) [ sm.set_next Idle ] ]
         ]
     ];
-  { O.valid = sm.is Validate &: good &: ~:(i.clear)
+  { O.valid = sm.is Validate &: good &: ~:clear
   ; msg_type = mux2 is_a (of_int ~width:2 0)
       (mux2 is_e (of_int ~width:2 1) (mux2 is_x (of_int ~width:2 2) (of_int ~width:2 3)))
   ; order_ref = field 11 8
   ; side = is_a &: (field 19 1 ==:. 0x53)
   ; shares = mux2 is_a (field 20 4) (mux2 (is_e |: is_x) (field 19 4) (zero 32))
   ; price = mux2 is_a (field 32 4) (zero 32)
-  ; timestamp_ns = field 5 6
-  ; error = error.value
-  ; filtered = filtered.value
   }
+
+let create ?(stock_locate = 1) (i : _ I.t) : _ O.t =
+  let m =
+    Mold_deframer.create ~clock:i.clock ~clear:i.clear ~in_data:i.in_data
+      ~in_valid:i.in_valid ~in_last:i.in_last
+  in
+  (* [abort]: the packet ended mid-message, so reset the decoder and drop it. *)
+  decode ~stock_locate ~clock:i.clock ~clear:(i.clear |: m.abort) ~valid:m.valid
+    ~data:m.data ~first:m.first ~last:m.last

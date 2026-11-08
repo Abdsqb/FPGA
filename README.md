@@ -9,8 +9,9 @@ measured in clock cycles.
 
 The [Amirlan checklist](docs/nov8-checklist.md) links the worked Hardcaml
 examples, printable parser state-machine sketch, implemented ITCH decoder,
-interface contract and tests. The decoder handles framed A/E/X/D bodies;
-MoldUDP64 hardware framing and the hardware order book remain future work.
+interface contract and tests. The parser takes MoldUDP64 packets
+(cut-through deframing built in) and outputs Spec v1's parser signals; the
+hardware order book remains future work.
 
 ```sh
 opam exec --switch=fh -- dune exec hw/demo/learning_demo.exe
@@ -41,7 +42,7 @@ Also: reviews every pull request, runs the repo.
 
 | Folder | What goes in it | Status |
 |---|---|---|
-| `hw/` | Framed ITCH decoder and learning examples; BRAM order table and top-of-book logic planned | Decoder implemented and simulated; book next |
+| `hw/` | ITCH parser with MoldUDP64 deframer (matches Spec v1) and learning examples; BRAM order table and top-of-book logic planned | Parser implemented and simulated; book next |
 
 Also: leads the digital-logic crash course.
 
@@ -88,7 +89,7 @@ model/              pure OCaml, no hardware
   mold.ml             MoldUDP64 packets: 20-byte header + length-prefixed messages
   feed_gen.ml         random generator of valid message streams
 test/               expect tests + randomized tests for model/
-hw/                 Hardcaml counter, Always example and ITCH decoder; book later
+hw/                 Hardcaml counter, Always example, ITCH parser + MoldUDP64 deframer; book later
 hw/test/            hardware simulations and the testbench
 board/              board bring-up: Ethernet, clocks, UART, constraints, Vivado
 bin/gen_feed.ml     writes a feed file used by every stage

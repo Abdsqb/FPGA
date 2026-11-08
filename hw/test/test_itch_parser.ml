@@ -1,3 +1,6 @@
+(* The parser takes Spec v1's byte stream (MoldUDP64 packets, in_last = last
+   byte of each packet) and outputs Spec v1's "Parser -> order book" signals.
+   Packets here are built with the model's own encoder (Model.Mold, Model.Itch). *)
 open! Hardcaml
 module P = Hw.Itch_parser
 module Sim = Cyclesim.With_interface (P.I) (P.O)
@@ -9,7 +12,6 @@ let bit b = if b then Bits.vdd else Bits.gnd
 let setup () =
   let sim = Sim.create P.create in
   let i = Cyclesim.inputs sim and o = Cyclesim.outputs sim in
-  i.stock_locate := Bits.of_int ~width:16 1;
   i.clear := Bits.vdd;
   Cyclesim.cycle sim;
   i.clear := Bits.gnd;
@@ -28,45 +30,45 @@ let decoded (o : Bits.t ref P.O.t) =
   | 3 -> Order_delete { order_ref }
   | _ -> assert false
 
-(* [step] advances one clock and records what the parser reported in that
-   cycle: a decoded message on each [valid] pulse (a pulse lasting two
-   cycles would be recorded twice), error codes, and filtered pulses. *)
-let recorder sim (o : Bits.t ref P.O.t) =
-  let msgs = ref [] and refs = ref [] and errors = ref [] and filtered = ref 0 in
+(* [step] advances one clock and records each [valid] pulse. A pulse lasting
+   two cycles would be recorded twice, so counting them checks "one cycle per
+   message". [on_valid] lets a test inspect the raw outputs in that cycle. *)
+let recorder ?(on_valid = fun () -> ()) sim (o : Bits.t ref P.O.t) =
+  let msgs = ref [] and refs = ref [] in
   let step () =
     Cyclesim.cycle sim;
-    if value o.valid = 1 then (msgs := decoded o :: !msgs; refs := ref64 o :: !refs);
-    if value o.error <> 0 then errors := value o.error :: !errors;
-    filtered := !filtered + value o.filtered
+    if value o.valid = 1 then begin
+      msgs := decoded o :: !msgs;
+      refs := ref64 o :: !refs;
+      on_valid ()
+    end
   in
-  let result () = List.rev !msgs, List.rev !errors, !filtered in
-  let refs () = List.rev !refs in
-  step, result, refs
+  step, (fun () -> List.rev !msgs), (fun () -> List.rev !refs)
 
-let drive (i : Bits.t ref P.I.t) ~first ~last byte =
+let drive (i : Bits.t ref P.I.t) ~last byte =
   i.in_valid := Bits.vdd;
   i.in_data := Bits.of_int ~width:8 byte;
-  i.in_first := bit first;
   i.in_last := bit last
 
 let idle (i : Bits.t ref P.I.t) =
   i.in_valid := Bits.gnd;
-  i.in_first := Bits.gnd;
   i.in_last := Bits.gnd
 
-(* Feed one message (optionally with idle gaps), then two idle cycles.
-   Returns (messages reported, error codes, filtered pulses). *)
-let send ?(gaps = false) ?(first = true) ?(extra_first = -1) sim i o data =
-  let step, result, _ = recorder sim o in
+(* Drive one UDP payload, optionally with idle gaps between bytes. *)
+let drive_packet ?(gaps = false) step i packet =
   Bytes.iteri (fun n byte ->
     if gaps && n mod 3 = 1 then (idle i; step (); step ());
-    drive i ~first:((n = 0 && first) || n = extra_first)
-      ~last:(n = Bytes.length data - 1) (Char.code byte);
-    step ()) data;
+    drive i ~last:(n = Bytes.length packet - 1) (Char.code byte);
+    step ()) packet
+
+(* Send one packet, then two idle cycles; return the messages reported. *)
+let send ?gaps sim i o packet =
+  let step, msgs, _ = recorder sim o in
+  drive_packet ?gaps step i packet;
   idle i;
   step ();
   step ();
-  result ()
+  msgs ()
 
 let from_hex s =
   String.split_on_char ' ' s
@@ -78,157 +80,158 @@ let sample = from_hex
   "41 00 01 00 00 1f 1a ce d9 f0 00 00 00 00 00 00 00 00 2a 42 00 00 00 64 41 41 50 4c 20 20 20 20 00 16 ed 24"
 
 let aapl = Model.Msg.Add_order { order_ref = 42; side = Buy; shares = 100; price = 1_502_500 }
+let packet msgs = Model.Mold.encode ~seq:1 msgs
+let mutation pos v = let b = Bytes.copy sample in Bytes.set_uint8 b pos v; b
 
-let%expect_test "the reading guide's 36-byte AAPL Add, with input bubbles" =
+let%expect_test "the reading guide's AAPL Add, inside a MoldUDP64 packet, with gaps" =
   let sim, i, o = setup () in
-  assert (Bytes.length sample = 36);
-  let step, result, _ = recorder sim o in
-  let ts = ref 0 in
-  Bytes.iteri (fun n byte ->
-    if n mod 3 = 1 then (idle i; step (); step ());
-    drive i ~first:(n = 0) ~last:(n = 35) (Char.code byte);
-    step ();
-    if value o.valid = 1 then ts := value o.timestamp_ns) sample;
-  idle i;
-  for _ = 1 to 8 do step () done;
-  let msgs, errors, filtered = result () in
-  assert (msgs = [ aapl ] && errors = [] && filtered = 0);
-  print_endline (Model.Msg.to_string (List.hd msgs));
-  Printf.printf "timestamp_ns=%d; valid pulsed for exactly one cycle\n" !ts;
+  let p = packet [ sample ] in
+  let got = send ~gaps:true sim i o p in
+  assert (got = [ aapl ]);
+  Printf.printf "%d-byte packet -> %s\n" (Bytes.length p) (Model.Msg.to_string (List.hd got));
+  print_endline "valid pulsed for exactly one cycle";
   [%expect {|
-    Add_order      order_ref=42 B 100 @ 1502500
-    timestamp_ns=34200000000000; valid pulsed for exactly one cycle
+    58-byte packet -> Add_order      order_ref=42 B 100 @ 1502500
+    valid pulsed for exactly one cycle
     |}]
 
-let%expect_test "all message types, zeroed irrelevant fields, and unsigned 32-bit boundaries" =
+let%expect_test "all four message types in one packet, in order, irrelevant fields zero" =
   let sim, i, o = setup () in
   let messages = Model.Msg.[
     Add_order { order_ref = 4095; side = Sell; shares = 0xFFFF_FFFF; price = 2_000_000_000 };
     Order_executed { order_ref = 4095; shares = 0x8000_0000 };
     Order_cancel { order_ref = 0; shares = 0xFFFF_FFFF };
     Order_delete { order_ref = 0 } ] in
-  List.iter (fun msg ->
-    let step, result, _ = recorder sim o in
-    let bytes = Model.Itch.encode msg in
-    let checked = ref false in
-    Bytes.iteri (fun n c ->
-      drive i ~first:(n = 0) ~last:(n = Bytes.length bytes - 1) (Char.code c);
-      step ();
-      if value o.valid = 1 then begin
-        if value o.msg_type <> 0 then assert (value o.price = 0 && value o.side = 0);
-        if value o.msg_type = 3 then assert (value o.shares = 0);
-        checked := true
-      end) bytes;
-    idle i;
-    step ();
-    assert (!checked && result () = ([ msg ], [], 0))) messages;
-  print_endline "A/E/X/D match; IDs 0 and 4095 and unsigned shares preserved";
-  [%expect {| A/E/X/D match; IDs 0 and 4095 and unsigned shares preserved |}]
+  let on_valid () =
+    if value o.msg_type <> 0 then assert (value o.price = 0 && value o.side = 0);
+    if value o.msg_type = 3 then assert (value o.shares = 0)
+  in
+  let step, msgs, _ = recorder ~on_valid sim o in
+  drive_packet step i (packet (List.map Model.Itch.encode messages));
+  idle i;
+  step ();
+  assert (msgs () = messages);
+  print_endline "A/E/X/D decoded in order; IDs 0 and 4095 and unsigned shares preserved";
+  [%expect {| A/E/X/D decoded in order; IDs 0 and 4095 and unsigned shares preserved |}]
 
 let%expect_test "the full 64-bit order ref is passed through, as in Spec v1" =
   let sim, i, o = setup () in
-  let with_ref_bytes pairs =
-    let b = Bytes.copy sample in
-    List.iter (fun (pos, v) -> Bytes.set_uint8 b pos v) pairs;
-    b
-  in
-  let show bytes =
-    let step, result, refs = recorder sim o in
-    Bytes.iteri (fun n c ->
-      drive i ~first:(n = 0) ~last:(n = 35) (Char.code c);
-      step ()) bytes;
+  let show msg_bytes =
+    let step, _, refs = recorder sim o in
+    drive_packet step i (packet [ msg_bytes ]);
     idle i;
     step ();
-    step ();
-    let msgs, errors, _ = result () in
     match refs () with
-    | [ r ] ->
-      Printf.printf "order_ref=0x%016Lx  low 12 bits (table index)=%Ld  errors=%d  messages=%d\n"
-        r (Int64.logand r 0xFFFL) (List.length errors) (List.length msgs)
+    | [ r ] -> Printf.printf "order_ref=0x%016Lx  low 12 bits (table index)=%Ld\n" r (Int64.logand r 0xFFFL)
     | _ -> print_endline "no message"
   in
   show sample;
-  show (with_ref_bytes [ (17, 0x10) ]);  (* 0x102A = 4138 *)
-  show (with_ref_bytes [ (11, 0x80) ]);  (* top bit of the 64-bit ref *)
+  show (mutation 17 0x10);  (* 0x102A = 4138 *)
+  show (mutation 11 0x80);  (* top bit of the 64-bit ref *)
   [%expect {|
-    order_ref=0x000000000000002a  low 12 bits (table index)=42  errors=0  messages=1
-    order_ref=0x000000000000102a  low 12 bits (table index)=42  errors=0  messages=1
-    order_ref=0x800000000000002a  low 12 bits (table index)=42  errors=0  messages=1
+    order_ref=0x000000000000002a  low 12 bits (table index)=42
+    order_ref=0x000000000000102a  low 12 bits (table index)=42
+    order_ref=0x800000000000002a  low 12 bits (table index)=42
     |}]
 
-let%expect_test "bad frames are reported and the parser recovers" =
+let%expect_test "heartbeat and end-of-session packets carry no messages" =
   let sim, i, o = setup () in
-  let mutation pos v = let b = Bytes.copy sample in Bytes.set_uint8 b pos v; b in
-  let check ?(first = true) ?(extra_first = -1) bytes code =
-    assert (send ~first ~extra_first sim i o bytes = ([], [ code ], 0));
-    assert (send sim i o sample = ([ aapl ], [], 0))
-  in
-  check (Bytes.sub sample 0 35) 2;
-  check (Bytes.cat sample (Bytes.make 8 '\000')) 2;
-  check (mutation 0 (Char.code 'U')) 3;
-  check (mutation 19 (Char.code '?')) 4;
-  check ~first:false sample 1;
-  check ~extra_first:8 sample 1;
-  assert (send sim i o (mutation 2 2) = ([], [], 1));
-  print_endline "6 malformed cases reported and recovered; foreign stock filtered";
-  [%expect {| 6 malformed cases reported and recovered; foreign stock filtered |}]
+  let hb = send sim i o (Model.Mold.heartbeat ~seq:1 ()) in
+  let eos = send sim i o (Model.Mold.end_of_session ~seq:1 ()) in
+  let after = send sim i o (packet [ sample ]) in
+  Printf.printf "heartbeat: %d messages; end of session: %d; next packet: %d\n"
+    (List.length hb) (List.length eos) (List.length after);
+  [%expect {| heartbeat: 0 messages; end of session: 0; next packet: 1 |}]
 
-let%expect_test "back-to-back messages, one byte every cycle, no gaps" =
+let%expect_test "bad messages and bad packets produce no output, and the parser recovers" =
   let sim, i, o = setup () in
-  let step, result, _ = recorder sim o in
-  let msgs = Model.Feed_gen.generate { Model.Feed_gen.default_config with seed = 3 } 1_000 in
+  let bad =
+    [ "unsupported type 'U'", packet [ mutation 0 (Char.code 'U') ]
+    ; "bad side byte", packet [ mutation 19 (Char.code '?') ]
+    ; "Add with 35 bytes", packet [ Bytes.sub sample 0 35 ]
+    ; "Add with 37 bytes", packet [ Bytes.cat sample (Bytes.make 1 '\000') ]
+    ; "other stock (locate 2)", packet [ mutation 2 2 ]
+    ; "packet cut off mid-message", Bytes.sub (packet [ sample ]) 0 40
+    (* Cut-through: the complete first message was already passed on. *)
+    ; "cut after 1 complete message", Bytes.sub (packet [ sample; sample ]) 0 59
+    ]
+  in
+  List.iter (fun (name, p) ->
+    let got = send sim i o p in
+    let next = send sim i o (packet [ sample ]) in
+    Printf.printf "%-28s -> %d output(s); next packet decodes: %b\n" name (List.length got) (next = [ aapl ]))
+    bad;
+  (* A bad message doesn't disturb the good ones around it in the same packet. *)
+  let mixed = send sim i o (packet [ sample; mutation 0 (Char.code 'U'); sample ]) in
+  Printf.printf "good, bad, good in one packet -> %d output(s)\n" (List.length mixed);
+  [%expect {|
+    unsupported type 'U'         -> 0 output(s); next packet decodes: true
+    bad side byte                -> 0 output(s); next packet decodes: true
+    Add with 35 bytes            -> 0 output(s); next packet decodes: true
+    Add with 37 bytes            -> 0 output(s); next packet decodes: true
+    other stock (locate 2)       -> 0 output(s); next packet decodes: true
+    packet cut off mid-message   -> 0 output(s); next packet decodes: true
+    cut after 1 complete message -> 1 output(s); next packet decodes: true
+    good, bad, good in one packet -> 2 output(s)
+    |}]
+
+let%expect_test "packets back to back, one byte every cycle, no gaps" =
+  let sim, i, o = setup () in
+  let step, msgs, _ = recorder sim o in
+  let sent = Model.Feed_gen.generate { Model.Feed_gen.default_config with seed = 3 } 1_000 in
+  let packets = Model.Mold.packetize (List.map Model.Itch.encode sent) in
   let cycles = ref 0 in
-  List.iter (fun m ->
-    let b = Model.Itch.encode m in
+  List.iter (fun p ->
     Bytes.iteri (fun n c ->
-      drive i ~first:(n = 0) ~last:(n = Bytes.length b - 1) (Char.code c);
+      drive i ~last:(n = Bytes.length p - 1) (Char.code c);
       step ();
-      incr cycles) b) msgs;
+      incr cycles) p) packets;
   idle i;
   step ();
-  let got, errors, _ = result () in
-  Printf.printf "%d messages in %d cycles (no idle cycles); decoded %d; errors %d; identical: %b\n"
-    (List.length msgs) !cycles (List.length got) (List.length errors) (got = msgs);
-  [%expect {| 1000 messages in 29664 cycles (no idle cycles); decoded 1000; errors 0; identical: true |}]
+  let got = msgs () in
+  Printf.printf "%d messages in %d packets, %d cycles with no idle cycles; decoded %d; identical: %b\n"
+    (List.length sent) (List.length packets) !cycles (List.length got) (got = sent);
+  [%expect {| 1000 messages in 22 packets, 32104 cycles with no idle cycles; decoded 1000; identical: true |}]
 
-let%expect_test "reset discards a partial message" =
+let%expect_test "reset in the middle of a packet" =
   let sim, i, o = setup () in
-  let step, result, _ = recorder sim o in
-  Bytes.iteri (fun n c ->
-    if n < 20 then (drive i ~first:(n = 0) ~last:false (Char.code c); step ())) sample;
+  let step, msgs, _ = recorder sim o in
+  let p = packet [ sample ] in
+  Bytes.iteri (fun n c -> if n < 30 then (drive i ~last:false (Char.code c); step ())) p;
   i.clear := Bits.vdd;
   idle i;
   step ();
   i.clear := Bits.gnd;
   step ();
-  let partial, _, _ = result () in
-  let after = send sim i o sample in
-  assert (partial = [] && after = ([ aapl ], [], 0));
-  print_endline "reset flushes a partial message; next message decodes normally";
-  [%expect {| reset flushes a partial message; next message decodes normally |}]
+  let partial = msgs () in
+  let after = send sim i o p in
+  assert (partial = [] && after = [ aapl ]);
+  print_endline "reset drops the partial packet; the next packet decodes normally";
+  [%expect {| reset drops the partial packet; the next packet decodes normally |}]
 
-let%expect_test "10,000 generated messages agree with the model encoder and order book" =
+let%expect_test "10,000 generated messages in MoldUDP64 packets agree with the model" =
   let sim, i, o = setup () in
-  let gen = Model.Feed_gen.create { Model.Feed_gen.default_config with seed = 8 } in
-  let expected_book = ref Model.Order_book.empty in
-  let parsed_book = ref Model.Order_book.empty in
-  let apply book msg = match Model.Order_book.apply !book msg with
-    | Ok next -> book := next
+  let sent = Model.Feed_gen.generate { Model.Feed_gen.default_config with seed = 8 } 10_000 in
+  let packets = Model.Mold.packetize (List.map Model.Itch.encode sent) in
+  let got =
+    List.concat (List.mapi (fun n p -> send ~gaps:(n mod 3 = 0) sim i o p) packets)
+  in
+  assert (List.length got = List.length sent);
+  (* Apply both streams to the model's order book and compare after every message. *)
+  let apply book msg =
+    match Model.Order_book.apply book msg with
+    | Ok next -> next
     | Error e -> failwith (Model.Order_book.error_to_string e)
   in
-  for n = 1 to 10_000 do
-    let msg = Model.Feed_gen.next gen in
-    let actual =
-      match send ~gaps:(n mod 7 = 0) sim i o (Model.Itch.encode msg) with
-      | [ m ], [], 0 -> m
-      | _ -> failwith (Printf.sprintf "message %d: expected exactly one output" n)
-    in
-    assert (actual = msg);
-    apply expected_book msg;
-    apply parsed_book actual;
-    assert (Model.Order_book.best_bid !expected_book = Model.Order_book.best_bid !parsed_book);
-    assert (Model.Order_book.best_ask !expected_book = Model.Order_book.best_ask !parsed_book);
-    assert (Model.Order_book.live_orders !expected_book = Model.Order_book.live_orders !parsed_book)
-  done;
-  print_endline "10,000 messages: zero parser/model mismatches (seed 8)";
-  [%expect {| 10,000 messages: zero parser/model mismatches (seed 8) |}]
+  let mismatches = ref 0 in
+  ignore
+    (List.fold_left2 (fun (expected, parsed) s g ->
+       let expected = apply expected s and parsed = apply parsed g in
+       if Model.Order_book.best_bid expected <> Model.Order_book.best_bid parsed
+          || Model.Order_book.best_ask expected <> Model.Order_book.best_ask parsed
+       then incr mismatches;
+       expected, parsed)
+       (Model.Order_book.empty, Model.Order_book.empty) sent got);
+  Printf.printf "10,000 messages in %d packets: %d best bid/ask mismatches (seed 8)\n"
+    (List.length packets) !mismatches;
+  [%expect {| 10,000 messages in 221 packets: 0 best bid/ask mismatches (seed 8) |}]

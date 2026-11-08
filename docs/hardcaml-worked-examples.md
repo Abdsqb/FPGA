@@ -64,7 +64,7 @@ The test checks this trace, restart, and reset while busy. Testbench steps must 
 
 In the counter view, count changes only on enabled edges. In the Always view, the pause leaves count unchanged; busy drops when done rises; done lasts one cycle. In the parser view:
 
-1. `in_first` accompanies the type byte, and `in_last` accompanies byte 35 of Add.
+1. The input is a whole MoldUDP64 packet; `in_last` marks its final byte. Inside, the deframer marks each message's first and last byte.
 2. A byte is taken on every cycle with `in_valid=1`. Input gaps do not move offsets.
 3. After the last byte, Validate has a full register image, including the final byte.
 4. `valid` is high for exactly one cycle per message (Spec v1); the fields are meaningful in that cycle.
@@ -77,6 +77,7 @@ The parser demo shows the one-cycle `valid` pulse. The literal-vector test adds 
 - **Why register the bytes?** They arrive on different clock edges, while decoding needs multiple fields together.
 - **Why a separate Validate state?** Register writes take effect at the edge; this guarantees the final stored byte is visible during validation.
 - **Why no ready signal?** Spec v1 has none: Ethernet can't be paused, and bytes arrive at most once every 8 core cycles, so the parser (which never stalls) always keeps up.
+- **Why pass bytes straight through instead of buffering the packet?** Lower latency (no ~118 µs wait for a full packet). The cost: a packet that turns out bad at its end may already have updated the book. That trade-off is noted in `hw/mold_deframer.ml` to revisit.
 - **Why output all 64 wire-ID bits?** Spec v1 keeps the full ref; the order book uses the low 12 bits as its table index. That's safe because our generator only issues refs 0–4,095.
 - **Why not update the book on every byte?** No complete, checked message exists until all fields and boundaries have been validated.
 - **Is the FPGA always constant latency?** This decoder has a defined unstalled schedule. Input gaps, downstream stalls, framing, CDC and the future book algorithm affect end-to-end latency.
