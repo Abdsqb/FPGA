@@ -30,9 +30,12 @@ whole design.
 | Folder / file | What's in it | Status |
 |---|---|---|
 | `model/` | Reference model (the answer key), message types, ITCH 5.0 format, random feed generator | Done |
+| `model/price_bitmap.ml` | Prototype of Spec v1's next-best-price bitmap (two-level, 64 × 64), separate from the reference model | Week 2: checked against a scan and the model; base price still open |
 | `test/` | Tests for everything in `model/` | Done |
 | `bin/` | `gen_feed`: writes the feed files every stage uses | Done |
 | `hw/test/` | Parser/model regression and hardware learning examples; full hardware-book comparison planned | Parser tests available; book comparison next |
+| `tools/` | `replay`: sends MoldUDP64 packets over UDP at a chosen rate, for testing the board | Week 2: done; default port/address to confirm with Enes |
+| `board/uart/` | UART transmitter (115,200 baud), moved from EE in week 2 | Week 2: byte sender done; 20-byte frame waits on the frame layout |
 | `.github/workflows/` | CI: builds and tests every push and pull request | Done |
 | `README.md`, `dune-project`, `feed_handler.opam.locked` | Setup guide, project settings, pinned library versions | Done |
 
@@ -50,7 +53,7 @@ Also: leads the digital-logic crash course.
 
 | Folder | What goes in it | Status |
 |---|---|---|
-| `board/` | Ethernet receive (PHY, MII, UDP filter), clocks, UART output, pin and timing constraints (XDC), Vivado build scripts | Setting up; see [`board/README.md`](board/README.md) |
+| `board/` | Ethernet receive (PHY, MII, UDP filter), clocks, pin and timing constraints (XDC), Vivado build scripts (UART moved to CS in `board/uart/`) | Setting up; see [`board/README.md`](board/README.md) |
 
 Also: project lead, buys the parts, records the demo video.
 
@@ -59,7 +62,7 @@ Also: project lead, buys the parts, records the demo video.
 | Folder | What goes in it | Status |
 |---|---|---|
 | `baseline/` *(planned)* | C program on Linux that reads the same feed from UDP sockets, for the speed comparison | Later |
-| `tools/` *(planned)* | Script that replays feed files as UDP packets; script that reads the board's UART output | Later |
+| `tools/` | Replay tool done (CS, week 2); script that reads the board's UART output still planned | Partly |
 
 Also: latency measurement, comparison chart, write-up.
 
@@ -88,10 +91,13 @@ model/              pure OCaml, no hardware
   itch.ml             ITCH 5.0 byte layouts: encode / decode / framing
   mold.ml             MoldUDP64 packets: 20-byte header + length-prefixed messages
   feed_gen.ml         random generator of valid message streams
+  price_bitmap.ml     next-best-price bitmap prototype (Spec v1), not the answer key
 test/               expect tests + randomized tests for model/
 hw/                 Hardcaml counter, Always example, ITCH parser + MoldUDP64 deframer; book later
 hw/test/            hardware simulations and the testbench
-board/              board bring-up: Ethernet, clocks, UART, constraints, Vivado
+board/              board bring-up: Ethernet, clocks, constraints, Vivado
+board/uart/         UART transmitter, 115,200 baud (CS)
+tools/              replay: send MoldUDP64 packets over UDP (CS)
 bin/gen_feed.ml     writes a feed file used by every stage
 dune-project        project settings and dependencies
 feed_handler.opam   generated from dune-project; don't edit by hand
@@ -200,6 +206,8 @@ dune promote                                       # accept new expect output (r
 dune exec bin/gen_feed.exe -- -n 20 -print         # see a feed + top of book
 dune exec bin/gen_feed.exe -- -n 100000 -o feed.bin        # bare messages
 dune exec bin/gen_feed.exe -- -n 100000 -mold -o feed.mold  # MoldUDP64 packets, ready to send over UDP
+dune exec tools/replay_main.exe -- -file feed.mold -rate 100 -addr 192.168.1.255 -port 5000   # send them
+dune exec tools/replay_main.exe -- -n 1000 -per-packet 1 -rate 50 -dry-run                 # one message per packet; preview only
 ```
 
 ## Workflow

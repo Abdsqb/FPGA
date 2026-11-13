@@ -2,6 +2,7 @@ _build/
 _opam/
 *.install
 *.bin
+*.mold
 *.vcd
 .merlin
 # Vivado output

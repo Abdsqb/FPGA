@@ -1,0 +1,6 @@
+(library
+ (name replay_tests)
+ (libraries replay model unix)
+ (inline_tests)
+ (preprocess
+  (pps ppx_expect)))

@@ -1,0 +1,11 @@
+; PC-side tools (CS). replay: send MoldUDP64 packets over UDP.
+
+(library
+ (name replay)
+ (modules replay)
+ (libraries model unix))
+
+(executable
+ (name replay_main)
+ (modules replay_main)
+ (libraries replay))

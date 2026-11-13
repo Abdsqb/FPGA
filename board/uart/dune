@@ -1,0 +1,8 @@
+; UART transmitter (CS, moved from EE in week 2). Kept in its own folder so
+; it doesn't clash with Enes's board/ layout.
+
+(library
+ (name uart)
+ (libraries hardcaml)
+ (preprocess
+  (pps ppx_hardcaml ppx_jane)))
